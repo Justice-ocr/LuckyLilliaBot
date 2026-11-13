@@ -172,7 +172,7 @@ const QQLogin: React.FC<QQLoginProps> = ({ onLoginSuccess }) => {
         throw new Error(result.message || '获取二维码失败');
       }
     } catch {
-      // 直连 client 可能刚录入 token 正在初始化, 二维码还没就绪 -> 慢速静默重试, 成功即停
+      // External QQ backend may still be starting; retry without requiring platform registration.
       setTimeout(() => generateQrCodeRef.current?.(), 3000);
     }
   }, [displayQrCode, pollLoginStatus, stopLoginPolling]);
@@ -254,17 +254,20 @@ const QQLogin: React.FC<QQLoginProps> = ({ onLoginSuccess }) => {
     generateQrCodeRef.current = generateQrCode;
   }, [generateQrCode]);
 
-  // 轮询 auth token 状态: 展示登录/sign 错误 (如可用 QQ 数量上限) 及验证服务不可达提示; 自愈后自动清除
+  // Poll real backend diagnostics, never platform registration status.
   useEffect(() => {
     let stopped = false;
     const poll = async () => {
       // WebUI 已被账号配置关闭: 后端即将关停, 别再轮询 (否则 502 刷屏)
       if (stopped || webuiClosedRef.current) return;
       try {
-        const res = await apiFetch<{ loginError: string; validation: string; message: string }>('/api/auth-token/status');
+        const res = await apiFetch<{ loginError: string; connected: boolean; online: boolean }>('/api/backend-status');
         if (!stopped && res.success) {
           const d = res.data;
-          setAuthLoginError(d.loginError || (d.validation === 'error' ? (d.message || '') : ''));
+          setAuthLoginError(d.loginError || (!d.connected ? '等待本机 PMHQ / QQ 后端连接，无需 LLBot 平台账号' : ''));
+          // QQ can log in outside this page, even before a QR is available here.
+          // Reuse login-info handling so account-specific WebUI settings are respected.
+          if (d.online) void pollLoginStatus();
         }
       } catch {
         // ignore
@@ -273,7 +276,7 @@ const QQLogin: React.FC<QQLoginProps> = ({ onLoginSuccess }) => {
     };
     poll();
     return () => { stopped = true; };
-  }, []);
+  }, [pollLoginStatus]);
 
   if (webuiClosed) {
     return (

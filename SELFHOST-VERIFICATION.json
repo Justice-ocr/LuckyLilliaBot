@@ -1,0 +1,53 @@
+{
+  "verified_at": "2026-11-13T09:25:39.927923+00:00",
+  "upstream_commit": "de602971f850c3965a9b348e7d1f3e723eb1eba7",
+  "reference_fork_commit": "0481432a17804d7a0d0d9100ec7a4b3d73bb3127",
+  "node": "v24.19.0",
+  "tests": {
+    "files": 27,
+    "passed": 283,
+    "failed": 0
+  },
+  "backend_typecheck": true,
+  "backend_build": true,
+  "frontend_build": true,
+  "frontend_typecheck": {
+    "upstream_errors": 105,
+    "modified_errors": 105,
+    "same_diagnostics_ignoring_line_numbers": true,
+    "same_dependencies": true
+  },
+  "unchanged_business_directories": [
+    "src/onebot11",
+    "src/milky",
+    "src/satori",
+    "src/ntqqapi",
+    "src/main/qqProtocol/mixins"
+  ],
+  "platform_artifact_audit": {
+    "markers": 0,
+    "native_signing_modules": 0,
+    "signing_runtime_sources": 0
+  },
+  "controller_smoke": {
+    "modern": "passed",
+    "legacy": "passed",
+    "webui_status": 200,
+    "unauthenticated_status": 403,
+    "registration_routes_status": 404,
+    "platform_token_file_created": false,
+    "backend_disconnect_detected": true,
+    "invalid_argument_exit_code": 1,
+    "backend": "loopback offline stub"
+  },
+  "docker": {
+    "startup_shell_syntax": "passed",
+    "image_build_tested": false,
+    "reason": "Docker Desktop Linux engine pipe unavailable"
+  },
+  "real_qq_login_tested": false,
+  "real_message_delivery_tested": false,
+  "external_pmhq_qq_required": true,
+  "dormant_direct_source_retained": true,
+  "llbot_js_sha256": "a1104a4b3677d2cf60c9468e6caa26d4baa9c569673014e5a77f4783d312a44c"
+}

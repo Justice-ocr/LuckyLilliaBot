@@ -28,10 +28,10 @@ import { version } from '../version'
 import { WebuiServer } from '../webui/BE/server'
 import EmailNotificationService from '@/common/emailNotification'
 import { EmailConfig } from '@/common/emailConfig'
-import { isPmhqMode } from '@/common/utils/environment'
+import { getPmhqTarget } from '@/common/utils/environment'
 import { setConfigLogLevel, isDebugEnabled, bindLoggerFactory, getLogger } from '@/common/logger'
 import { pathToFileURL } from 'node:url'
-import { DirectQQProtocolClient, PmhqQQProtocolClient } from './qqProtocol'
+import { PmhqQQProtocolClient } from './qqProtocol'
 import LoggerConsole from '@cordisjs/plugin-logger-console'
 import TimerService from '@cordisjs/plugin-timer'
 import ConfigService from './config'
@@ -55,6 +55,8 @@ function applyDebugLevel(ctx: Context): void {
 }
 
 async function onLoad() {
+  // Validate before starting services or timers.
+  getPmhqTarget()
   if (!existsSync(LOG_DIR)) {
     mkdirSync(LOG_DIR)
   }
@@ -79,7 +81,8 @@ async function onLoad() {
   ctx.plugin(ConfigService)
   // 模式二选一: PMHQ 走 WS/HTTP, Direct 走 native sign + TCP + WebUI 扫码.
   // 之后 ctx.qqProtocol 就是选中的实现, 上层代码不感知模式.
-  ctx.plugin(isPmhqMode() ? PmhqQQProtocolClient : DirectQQProtocolClient)
+  // Never fall back to platform signing.
+  ctx.plugin(PmhqQQProtocolClient)
   ctx.plugin(NTFileApi)
   ctx.plugin(NTFriendApi)
   ctx.plugin(NTGroupApi)
@@ -178,4 +181,7 @@ async function onLoad() {
   })
 }
 
-onLoad().catch(e => getLogger('main').error(e))
+onLoad().catch(e => {
+  getLogger('main').error(e)
+  process.exitCode = 1
+})

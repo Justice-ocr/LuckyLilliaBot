@@ -118,6 +118,9 @@ export abstract class QQProtocolBase extends Service {
    * QQ 进程的 CPU/内存占用. **仅 PMHQ 模式实现** (PMHQ /health 直接给)。
    * Direct 模式纯代码复刻, 根本没有 QQ 进程可量 -> null, WebUI 据此不渲染 "QQ 资源" 卡。
    */
+  /** Backend diagnostics; connection alone is not evidence of QQ login. */
+  public getLoginError(): string { return '' }
+
   public async getQQResourceUsage(): Promise<QQResourceUsage | null> {
     return null
   }

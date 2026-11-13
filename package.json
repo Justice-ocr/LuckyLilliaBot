@@ -13,6 +13,9 @@
     "format": "prettier -cw .",
     "check": "tsc",
     "check:webui": "npm --prefix src/webui/FE run check",
+    "build:selfhost": "npm run build && npm run build-webui && npm run audit:selfhost",
+    "audit:selfhost": "node script/audit-selfhost.mjs",
+    "smoke:selfhost": "node script/smoke-selfhost.mjs",
     "test:webui": "vitest run --config vitest.config.ts 'test/webui'",
     "test:unit": "vitest run --config vitest.config.ts 'test/unit'",
     "test": "vitest run --config vitest.config.ts"

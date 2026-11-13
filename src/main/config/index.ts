@@ -349,6 +349,17 @@ class AuthTokenUtil {
   }
 }
 
-export const authTokenUtil = new AuthTokenUtil(path.join(DATA_DIR, isDevMode() ? 'auth_token.dev.txt' : 'auth_token.txt'))
+// Compatibility for dormant Direct source/tests only. No construction or file path resolution
+// occurs on importing config; production PMHQ does not reference this object.
+let legacyAuthTokenUtil: AuthTokenUtil | undefined
+function platformTokenUtil(): AuthTokenUtil {
+  return legacyAuthTokenUtil ??= new AuthTokenUtil(path.join(DATA_DIR, isDevMode() ? 'auth_token.dev.txt' : 'auth_token.txt'))
+}
+export const authTokenUtil = {
+  getToken: () => platformTokenUtil().getToken(),
+  getPath: () => platformTokenUtil().getPath(),
+  setToken: (token: string) => platformTokenUtil().setToken(token),
+  reload: () => platformTokenUtil().reload(),
+}
 
 

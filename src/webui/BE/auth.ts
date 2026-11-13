@@ -42,7 +42,7 @@ setInterval(() => {
       globalLoginAttempt.lockedUntil = null
     }
   }
-}, 60 * 60 * 1000)
+}, 60 * 60 * 1000).unref() // Housekeeping must not keep a failed startup alive.
 
 // 认证中间件
 export async function authMiddleware(c: Context, next: Next) {

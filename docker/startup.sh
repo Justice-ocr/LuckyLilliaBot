@@ -1,33 +1,30 @@
 #!/bin/sh
-
+set -eu
 cd /app/llbot
 
-FILE="default_config.json"
-WEBUI_PORT="${WEBUI_PORT:-3080}"
-
-sed -i "/\"webui\": {/,/}/ {
-    s/\"port\":[[:space:]]*3080/\"port\": ${WEBUI_PORT}/g
-}" "$FILE"
-
-sed -i "/\"webui\": {/,/}/ {
-    s/\"host\":[[:space:]]*\"127.0.0.1\"/\"host\": \"\"/g
-}" "$FILE"
-
-sed -i "s|\"ffmpeg\":[[:space:]]*\"\"|\"ffmpeg\": \"/usr/bin/ffmpeg\"|g" "$FILE"
-
-mkdir -p /app/llbot/data
-
-# PMHQ 有头模式: QQ 客户端跑在独立 pmhq 容器, llbot 靠 --pmhq-port/--pmhq-host 连过去.
-# 账号登录由 pmhq 容器的 AUTO_LOGIN_QQ 处理, llbot 侧不传 -q (session 在 pmhq 卷里).
-if [ "$PROTOCOL_MODE" = "pmhq" ]; then
-  PMHQ_PORT="${PMHQ_PORT:-13000}"
-  PMHQ_HOST="${PMHQ_HOST:-pmhq}"
-  exec node --enable-source-maps ./llbot.js --pmhq-port="$PMHQ_PORT" --pmhq-host="$PMHQ_HOST"
+if [ -n "${PROTOCOL_MODE:-}" ] && [ "$PROTOCOL_MODE" != "pmhq" ]; then
+  echo "This self-hosted build requires external PMHQ; PROTOCOL_MODE must be pmhq or omitted" >&2
+  exit 1
 fi
 
-# 指定 AUTO_LOGIN_QQ 重启后自动免扫码快速登录。
-# 不设 AUTO_LOGIN_QQ 则起在 WebUI 登录页, 由用户从快速登录列表点选账号 (或扫码)
-if [ -n "$AUTO_LOGIN_QQ" ]; then
-  exec node --enable-source-maps ./llbot.js -q "$AUTO_LOGIN_QQ"
-fi
-exec node --enable-source-maps ./llbot.js
+# Modify JSON structurally; reject invalid configuration rather than corrupting it with sed.
+node --input-type=module -e '
+import fs from "node:fs";
+const config = JSON.parse(fs.readFileSync("default_config.json", "utf8"));
+const port = process.env.WEBUI_PORT ?? "3080";
+if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) throw new Error("Invalid WEBUI_PORT");
+config.webui.port = Number(port);
+config.webui.host = process.env.WEBUI_HOST ?? "0.0.0.0";
+config.ffmpeg = "/usr/bin/ffmpeg";
+fs.writeFileSync("default_config.json", JSON.stringify(config, null, 2));
+'
+
+mkdir -p data
+set -- --pmhq-host="${PMHQ_HOST:-pmhq}" --pmhq-port="${PMHQ_PORT:-13000}" "$@"
+case "${PMHQ_LEGACY:-false}" in
+  true|1) set -- "$@" --pmhq-legacy ;;
+  false|0) ;;
+  *) echo "PMHQ_LEGACY must be true/false or 1/0" >&2; exit 1 ;;
+esac
+# QQ account/session management belongs to the external backend, not platform token files.
+exec node --enable-source-maps ./llbot.js "$@"

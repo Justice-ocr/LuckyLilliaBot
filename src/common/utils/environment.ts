@@ -1,4 +1,5 @@
 import { existsSync } from "fs"
+import { isIP } from 'node:net'
 
 export function isDockerEnvironment(): boolean {
     try {
@@ -8,41 +9,38 @@ export function isDockerEnvironment(): boolean {
     }
 }
 
-/**
- * 解析 PMHQ 连接目标, 返 null = 没传 --pmhq-port = 直连模式。
- * 空格和等号两种写法都认 (跟 --qq 对齐):
- *   --pmhq-port <port> / --pmhq-port=<port> / --pmhq-host <host> / --pmhq-host=<host>
- * 只要出现过 --pmhq-port 就算 PMHQ 模式, 没给值就用默认端口 -- 绝不因为写法不对静默退回直连
- * (那样会一路扫码连上 msfwifi 才发现跑的是直连)。
- */
-export function getPmhqTarget(argv: string[] = process.argv): { host: string; port: string } | null {
-    let requested = false
+/** External PMHQ is the only production backend; omitted flags use loopback, never direct mode. */
+export function getPmhqTarget(argv: string[] = process.argv): { host: string; port: string } {
     let port = '13000'
     let host = '127.0.0.1'
-    for (let i = 0; i < argv.length; i++) {
-        const a = argv[i]
-        // 值不能是下一个 flag: `--pmhq-port --dev` 不该把 "--dev" 当端口
-        const next = argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[i + 1] : undefined
-        if (a === '--pmhq-port') {
-            requested = true
-            if (next) port = next
-        } else if (a.startsWith('--pmhq-port=')) {
-            requested = true
-            const v = a.slice('--pmhq-port='.length)
-            if (v) port = v
-        } else if (a === '--pmhq-host') {
-            if (next) host = next
-        } else if (a.startsWith('--pmhq-host=')) {
-            const v = a.slice('--pmhq-host='.length)
-            if (v) host = v
+    for (let i = 2; i < argv.length; i++) {
+        const arg = argv[i]
+        if (arg === '--direct' || arg.startsWith('--direct=') || arg === '--cdn' || arg.startsWith('--cdn=') || arg === '--dev') {
+            throw new Error(`${arg}: platform/direct signing is not available in this self-hosted build`)
+        }
+        for (const flag of ['--pmhq-host', '--pmhq-port']) {
+            if (arg !== flag && !arg.startsWith(`${flag}=`)) continue
+            const value = arg === flag ? argv[++i] : arg.slice(flag.length + 1)
+            if (!value || value.startsWith('--') || value !== value.trim()) throw new Error(`${flag} requires a value`)
+            if (flag === '--pmhq-port') port = value
+            else host = value
         }
     }
-    return requested ? { host, port } : null
+    if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) throw new Error('Invalid PMHQ port (1-65535)')
+    const ip = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+    if (isIP(ip) === 6) host = `[${ip}]`
+    else if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(host)) throw new Error('Invalid PMHQ host (use a hostname or IP, not a URL)')
+    return { host, port: String(Number(port)) }
 }
 
-/** PMHQ 模式必须传 --pmhq-port (CLI/Desktop/docker 启动脚本都会带), 以此区分直连模式 */
+/** Retained for existing API mode labels; no platform-account backend is loaded. */
 export function isPmhqMode(): boolean {
-    return getPmhqTarget() !== null
+    return true
+}
+
+/** PMHQ 7 uses RPC/callback login rather than the newer HTTP health/QR endpoints. */
+export function usesLegacyPmhq(argv: string[] = process.argv): boolean {
+    return argv.includes('--pmhq-legacy')
 }
 
 /**

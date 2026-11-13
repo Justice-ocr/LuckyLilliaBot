@@ -5,14 +5,16 @@ import type {
   PMHQRes,
   PMHQReq,
   PMHQResSendPB,
+  PMHQResLegacyCall,
   PMHQHealth,
   PBData,
   QQResourceUsage,
   ResListener,
 } from './types'
 import { Context } from 'cordis'
-import { getPmhqTarget } from '@/common/utils/environment'
-import { buildSsoInfoSync } from './direct-lib'
+import { getPmhqTarget, usesLegacyPmhq } from '@/common/utils/environment'
+import { buildSsoInfoSync } from './protocol-support/ssoInfoSync'
+import { LegacyPmhqLogin } from './legacyPmhqLogin'
 import { QQProtocolBase } from './base'
 
 /**
@@ -20,6 +22,11 @@ import { QQProtocolBase } from './base'
  * QQ NT 早已登录, LLBot 寄生其上; 靠 /health 轮询拿 uin/uid.
  */
 export class PmhqQQProtocol extends QQProtocolBase {
+  private legacyLogin: LegacyPmhqLogin | undefined
+  private loginError = ''
+  // Application stores/config are initialized for one account; switching requires a restart.
+  private activeIdentity = ''
+  private probeTimer: NodeJS.Timeout | undefined
   private reconnectTimer: NodeJS.Timeout | undefined
   protected httpUrl: string
   protected wsUrl: string
@@ -33,11 +40,22 @@ export class PmhqQQProtocol extends QQProtocolBase {
 
   constructor(ctx: Context) {
     super(ctx)
-    // 只有 isPmhqMode() 为真才会 plugin 到这个类, ?? 分支实际走不到, 纯为类型收口
-    const { host, port } = getPmhqTarget() ?? { host: '127.0.0.1', port: '13000' }
+    const { host, port } = getPmhqTarget()
     this.httpUrl = `http://${host}:${port}/`
     this.wsUrl = `ws://${host}:${port}/ws`
+    if (usesLegacyPmhq()) {
+      this.legacyLogin = new LegacyPmhqLogin(async (func, args, timeout) => {
+        const response = await this.wsSend<PMHQResLegacyCall>({ type: 'call', data: { func, args } }, timeout)
+        if (response.type !== 'call' || !response.data) throw new Error('Invalid legacy PMHQ RPC response')
+        return response.data.result
+      }, listener => {
+        const id = this.addResListener(listener)
+        return () => this.removeResListener(id)
+      })
+    }
   }
+
+  public getLoginError(): string { return this.loginError }
 
   protected async start(): Promise<void> {
     // 订阅 recv 事件, 转发为 qq/raw 供 dispatcher 用. (旧代码里叫 startHook, 现在归内部)
@@ -69,7 +87,7 @@ export class PmhqQQProtocol extends QQProtocolBase {
       )
     }
     return this.unwrapPmhqRes(
-      await this.httpSend<PMHQResSendPB>({ type: 'send', data: { cmd, pb: hex } }),
+      await this.httpSend<PMHQResSendPB>({ type: 'send', data: { cmd, pb: hex } }, timeout),
       cmd,
     )
   }
@@ -108,6 +126,7 @@ export class PmhqQQProtocol extends QQProtocolBase {
   }
 
   private resetPmhqState() {
+    if (this.probeTimer) { clearTimeout(this.probeTimer); this.probeTimer = undefined }
     const wasOnline = this.onlineEmitted
     selfInfo.online = false
     selfInfo.uid = ''
@@ -129,28 +148,42 @@ export class PmhqQQProtocol extends QQProtocolBase {
    */
   private startPmhqLoginProbe() {
     this.resetPmhqState()
-    const myToken = ++this.pmhqProbeToken
+    let myToken = ++this.pmhqProbeToken
 
     let warnedNotLoggedIn = false
     const probe = async () => {
       if (this.pmhqProbeToken !== myToken) return
       try {
-        const resp = await fetch(`${this.httpUrl}health`)
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-        const health = await resp.json() as PMHQHealth
+        let health: { uin?: number | string | null; uid?: string | null; nick?: string; online?: boolean }
+        if (this.legacyLogin) health = await this.legacyLogin.readSelfInfo()
+        else {
+          const resp = await fetch(`${this.httpUrl}health`, { signal: AbortSignal.timeout(5000) })
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+          health = await resp.json() as PMHQHealth
+        }
         if (this.pmhqProbeToken !== myToken) return
+        this.loginError = ''
 
-        if (health.uin && health.uid) {
+        if (health.online !== false && /^[1-9]\d*$/.test(String(health.uin ?? '')) && typeof health.uid === 'string' && health.uid.length > 0) {
+          const identity = `${health.uin}:${health.uid}`
+          if (this.activeIdentity && this.activeIdentity !== identity) {
+            throw new Error('PMHQ account changed; restart LLBot before using a different QQ account')
+          }
+          this.activeIdentity = identity
           selfInfo.uid = health.uid
           selfInfo.uin = String(health.uin)
-          this.ctx.logger.info(`Self info ${selfInfo.nick || '<pending>'}(${selfInfo.uin}) uid=${selfInfo.uid}`)
-          if (!selfInfo.online) {
-            this.logger.info('QQ 登录成功')
-          }
+          if (health.nick) selfInfo.nick = health.nick
+          const firstOnline = !selfInfo.online
           selfInfo.online = true
           this.maybeEmitOnline()
-          this.scheduleFetchSelfNick(() => this.pmhqProbeToken === myToken)
+          if (firstOnline) {
+            this.logger.info('QQ 登录成功: %s (%s)', selfInfo.nick || '<pending>', selfInfo.uin)
+            const generation = this.pmhqProbeToken
+            this.scheduleFetchSelfNick(() => selfInfo.online && this.pmhqProbeToken === generation)
+            void this.triggerInfoSyncPush().catch(e => this.logger.debug('InfoSync: %s', (e as Error).message))
+          }
         } else {
+          if (selfInfo.online) { this.resetPmhqState(); myToken = this.pmhqProbeToken }
           // QQ 未登录: 此时才启动终端扫码 loop (幂等). 已登录则永不进拉码路径,
           // 避免对已登录的 QQ 拉码 -> get_login_qrcode 返回已登录 -> QR code unavailable 刷屏。
           this.ensureQrLoop()
@@ -161,14 +194,15 @@ export class PmhqQQProtocol extends QQProtocolBase {
         }
       } catch (e) {
         if (this.pmhqProbeToken !== myToken) return
+        this.loginError = (e as Error).message
+        if (selfInfo.online) { this.resetPmhqState(); myToken = this.pmhqProbeToken }
         if (!warnedNotLoggedIn) {
-          this.logger.info('PMHQ /health probe failed (QQ 未启动?), 继续等待: %s', (e as Error).message)
+          this.logger.info('PMHQ login probe failed, continuing: %s', this.loginError)
           warnedNotLoggedIn = true
         }
       }
       if (this.pmhqProbeToken !== myToken) return
-      if (selfInfo.online) return
-      setTimeout(probe, 600)
+      this.probeTimer = setTimeout(probe, selfInfo.online ? 5000 : 600)
     }
     probe()
   }
@@ -182,7 +216,8 @@ export class PmhqQQProtocol extends QQProtocolBase {
     message?: string
     data?: { pngBase64QrcodeData: string; qrcodeUrl: string; expireTime: number; pollTimeInterval: number }
   }> {
-    const resp = await fetch(`${this.httpUrl}get_login_qrcode`)
+    if (this.legacyLogin) return { code: 0, data: await this.legacyLogin.fetchQr() }
+    const resp = await fetch(`${this.httpUrl}get_login_qrcode`, { signal: AbortSignal.timeout(8000) })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     return await resp.json()
   }
@@ -194,6 +229,7 @@ export class PmhqQQProtocol extends QQProtocolBase {
    * 老 PMHQ 不返这两个字段 -> null, WebUI 不渲染 "QQ 资源" 卡。
    */
   public async getQQResourceUsage(): Promise<QQResourceUsage | null> {
+    if (this.legacyLogin) return null
     try {
       const resp = await fetch(`${this.httpUrl}health`, { signal: AbortSignal.timeout(3000) })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -226,7 +262,12 @@ export class PmhqQQProtocol extends QQProtocolBase {
 
   private async connectWebSocket() {
     const reconnect = () => {
+      const old = this.ws
       this.ws = undefined
+      if (old) {
+        old.onopen = old.onclose = old.onerror = old.onmessage = null
+        old.close()
+      }
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer)
         this.reconnectTimer = undefined
@@ -263,7 +304,7 @@ export class PmhqQQProtocol extends QQProtocolBase {
     }
 
     this.ws.onerror = () => {
-      selfInfo.online = false
+      this.loginError = 'PMHQ connection error; waiting for the external QQ backend'
       this.resetPmhqState()
 
       if (!this.hasLoggedConnectionError) {
@@ -275,7 +316,7 @@ export class PmhqQQProtocol extends QQProtocolBase {
     }
 
     this.ws.onclose = () => {
-      selfInfo.online = false
+      this.loginError = 'PMHQ disconnected; reconnecting'
       this.resetPmhqState()
 
       if (!this.hasLoggedConnectionError) {
@@ -298,53 +339,56 @@ export class PmhqQQProtocol extends QQProtocolBase {
     }
   }
 
-  public async waitConnected() {
-    return new Promise((resolve) => {
+  public async waitConnected(timeout = 15000): Promise<boolean> {
+    const deadline = Date.now() + timeout
+    return new Promise((resolve, reject) => {
       const check = () => {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          resolve(true)
-        } else {
-          setTimeout(check, 1000)
-        }
+        if (this.get_is_connected()) return resolve(true)
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) return reject(new Error('PMHQ connection timeout'))
+        setTimeout(check, Math.min(100, remaining))
       }
       check()
     })
   }
 
   public async wsSend<R extends PMHQRes>(data: PMHQReq, timeout = 15000): Promise<R> {
-    await this.waitConnected()
-    let echo = data.data?.echo
-    if (!data.data?.echo) {
-      echo = randomUUID()
-      data.data.echo = echo
-    }
+    const deadline = Date.now() + timeout
+    await this.waitConnected(timeout)
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('PMHQ request timeout before send')
+    const echo = data.data.echo ?? randomUUID()
+    data.data.echo = echo
     const payload = JSON.stringify(deepStringifyMap(data))
-    const p = new Promise<R>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        reject(new Error('pmhq ws send: wait result timeout'))
-        this.removeResListener(listenerId)
-      }, timeout)
-      const listenerId = this.addResListener<R>((res) => {
-        if (!res.data) {
-          this.logger.error(`PMHQ WS send error: payload ${JSON.stringify(data)}, response ${JSON.stringify(res)}`)
-        }
-        if (res.data?.echo == echo) {
-          resolve(res)
-          clearTimeout(timeoutId)
-          this.removeResListener(listenerId)
-        }
+    return new Promise<R>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.removeResListener(id)
+        reject(new Error('PMHQ response timeout'))
+      }, remaining)
+      const id = this.addResListener<R>(res => {
+        if (res.data?.echo !== echo) return
+        clearTimeout(timer)
+        this.removeResListener(id)
+        resolve(res)
       })
+      try {
+        if (!this.get_is_connected()) throw new Error('PMHQ disconnected before send')
+        this.ws!.send(payload)
+      } catch (error) {
+        clearTimeout(timer)
+        this.removeResListener(id)
+        reject(error)
+      }
     })
-    this.ws!.send(payload)
-    return p
   }
 
-  public async httpSend<R extends PMHQRes>(data: PMHQReq): Promise<R> {
+  public async httpSend<R extends PMHQRes>(data: PMHQReq, timeout = 15000): Promise<R> {
     const payload = JSON.stringify(deepStringifyMap(data))
     const response = await fetch(this.httpUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: payload,
+      signal: AbortSignal.timeout(timeout),
     })
     if (!response.ok) {
       const errorBody = await response.text()
@@ -366,6 +410,9 @@ export class PmhqQQProtocol extends QQProtocolBase {
       const pb = res.data?.pb ?? ''
       const detail = pb ? ` pb=${pb.slice(0, 160)}` : ' pb=<empty>'
       throw new Error(`PMHQ send failed: cmd=${cmd} code=${res.code} ${res.message ?? ''}${detail}`.trim())
+    }
+    if (!res.data || typeof res.data.cmd !== 'string' || res.data.cmd !== cmd || typeof res.data.pb !== 'string' || !/^(?:[0-9a-fA-F]{2})*$/.test(res.data.pb)) {
+      throw new Error(`PMHQ returned an invalid response for ${cmd}`)
     }
     return res.data
   }

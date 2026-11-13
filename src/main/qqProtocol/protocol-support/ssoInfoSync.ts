@@ -114,4 +114,3 @@ export function buildSsoInfoSync(guid: Buffer, isFirstOnline: boolean = true): B
 
   return Buffer.concat(parts)
 }
-
